@@ -6,7 +6,8 @@
 | Main scene is configured | Đạt | `run/main_scene` points to `res://main.tscn` |
 | Main scene has a 3D root | Đạt | `game/main.tscn`, node `Main` of type `Node3D` |
 | Headless project verification | Đạt | Godot command exited with code `0` |
-| Gameplay requirements | Chưa đánh giá | Requirements for later phases are not yet released |
+| Gameplay prototype | Đạt một phần | Godot scene contains the island, player, five lanterns, motes, shade placeholder and HUD; full polish is not claimed |
+| Headless core events | Đạt một phần | `game/headless.py` covers movement, pickup, deposit, pulse, hit, win/loss and JSONL output; hidden instructor scenarios remain to be run |
 
 ## Phase conclusion
 

@@ -101,3 +101,21 @@ Không commit API key, token hay `.env`. Gửi link repo theo hướng dẫn c�
 - Dùng AI thoải mái; không sao chép repo của người khác.
 - Bằng chứng phải thật: test luôn đạt hay output sửa tay là vi phạm.
 - Nhân vật, bối cảnh là bản gốc của lab; asset bên ngoài chỉ dùng loại CC0/CC-BY/MIT hoặc tự tạo, ghi nguồn trong `CREDITS.md`.
+## Chạy project hiện tại
+
+Project Godot nằm trong thư mục `game/`.
+
+```powershell
+& "D:\Godot_v4.7.2-stable_win64.exe" --path .\game --editor
+```
+
+Headless contract:
+
+```powershell
+python game\headless.py --seed 7 --night 1 --ticks 600 --out docs\phase-1\proof\run.jsonl
+```
+
+## Sáng tạo của tôi
+
+Prototype dùng bảng màu đêm xanh tím đối lập với đèn vàng cam, đảo tròn nổi
+giữa biển mây và HUD tiếng Việt. Các chi tiết này không thay đổi JSONL headless.
