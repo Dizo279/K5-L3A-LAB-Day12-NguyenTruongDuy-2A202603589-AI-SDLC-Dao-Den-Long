@@ -63,10 +63,14 @@ func _process(delta: float) -> void:
 		return
 	var left := maxf(0.0, float(game.get("time_left")))
 	var sec := int(ceil(left))
-	clock.text = "%02d:%02d" % [floori(float(sec) / 60.0), sec % 60]
-	clock.add_theme_color_override("font_color", Color("FF5A5F") if sec <= 30 else Color("F5F1E6"))
+	var is_cb: bool = bool(game.get("colorblind_mode")) if game != null else false
+	var alert_color: Color = Color("FFFFFF") if is_cb else Color("FF5A5F")
+	var prefix: String = "⚠ " if (is_cb and sec <= 30) else ""
+	clock.text = prefix + "%02d:%02d" % [floori(float(sec) / 60.0), sec % 60]
+	clock.add_theme_color_override("font_color", alert_color if sec <= 30 else Color("F5F1E6"))
 	clock.visible = sec > 30 or fposmod(elapsed, 0.5) < 0.25
-	var carried := clampi(int(game.get("carried")), 0, 10)
+	var cap := int(game.get("capacity")) if game != null else 10
+	var carried := clampi(int(game.get("carried")), 0, cap)
 	var lantern_list: Array = game.get("lanterns")
 	var progress: Array = game.get("lantern_progress")
 	var lit_count := 0
@@ -83,9 +87,9 @@ func _process(delta: float) -> void:
 		if i < progress.size() and progress[i] < 10 and distance <= 2.0: interact_near = true
 	var dash_cd := float(game.get("dash_cooldown"))
 	var pulse_cd := float(game.get("pulse_cooldown"))
-	hud.text = "FLAMES  %s     LANTERNS  %d/%d     SCORE  %d\nFIREFLIES  %s     DASH %.1fs   PULSE %.1fs   WASD/ARROWS: MOVE   SPACE: JUMP   SHIFT: DASH   Q: PULSE" % ["● ".repeat(int(game.get("flames"))), lit_count, lantern_list.size(), int(game.get("score")), "●".repeat(carried) + "○".repeat(10-carried), dash_cd, pulse_cd]
+	hud.text = "FLAMES  %s     LANTERNS  %d/%d     SCORE  %d\nFIREFLIES  %s (%d/%d)     DASH %.1fs   PULSE %.1fs   WASD/ARROWS: MOVE   SPACE: JUMP   SHIFT: DASH   Q: PULSE" % ["● ".repeat(int(game.get("flames"))), lit_count, lantern_list.size(), int(game.get("score")), "●".repeat(carried) + "○".repeat(maxi(0, cap-carried)), carried, cap, dash_cd, pulse_cd]
 	prompt.visible = interact_near
-	prompt.text = "E — Charge lantern (%d/10)" % carried
+	prompt.text = "E — Charge lantern (%d/%d)" % [carried, cap]
 	lantern_arrow.visible = false
 	if nearest != null and nearest_distance > 2.0:
 		var camera := get_viewport().get_camera_3d()
@@ -95,12 +99,12 @@ func _process(delta: float) -> void:
 			if screen_pos.x < 0 or screen_pos.x > viewport_size.x or screen_pos.y < 0 or screen_pos.y > viewport_size.y:
 				lantern_arrow.visible = true
 				lantern_arrow.position = Vector2(clampf(screen_pos.x, 24, viewport_size.x-210), clampf(screen_pos.y, 60, viewport_size.y-60))
-	var duration: float = [0.0, 300.0, 330.0, 360.0][int(game.get("night"))]
+	var duration: float = [0.0, 240.0, 270.0, 300.0][int(game.get("night"))]
 	var elapsed_night := duration - left
 	var wind_phase := fposmod(elapsed_night, 30.0)
 	var wind_now := int(game.get("night")) == 3 and elapsed_night >= 28.0 and wind_phase >= 28.0
 	if wind_now:
-		hud.text += "     WIND WARNING — gust soon"
+		hud.text += ("     ⚠ WIND WARNING — gust soon" if is_cb else "     WIND WARNING — gust soon")
 		if not warning_active: play_sfx("wind")
 	warning_active = wind_now
 	if sec <= 10 and sec < last_countdown_second:
@@ -216,8 +220,21 @@ func _show_settings() -> void:
 	var volume_label := Label.new(); volume_label.text = "Master volume"; settings_box.add_child(volume_label)
 	var sensitivity := HSlider.new(); sensitivity.min_value = 0.2; sensitivity.max_value = 3; sensitivity.step = 0.05; sensitivity.value = cfg.get_value("input", "sensitivity", 1.0); settings_box.add_child(sensitivity)
 	var sensitivity_label := Label.new(); sensitivity_label.text = "Mouse sensitivity"; settings_box.add_child(sensitivity_label)
+	var colorblind_check := CheckBox.new()
+	colorblind_check.text = "Bảng màu dễ phân biệt (Colorblind)"
+	colorblind_check.button_pressed = bool(cfg.get_value("accessibility", "colorblind", false))
+	settings_box.add_child(colorblind_check)
 	var save := Button.new(); save.text = "Save settings"; settings_box.add_child(save)
-	save.pressed.connect(func(): cfg.set_value("audio", "volume", volume.value); cfg.set_value("input", "sensitivity", sensitivity.value); cfg.save("user://settings.cfg"); AudioServer.set_bus_volume_linear(0, volume.value); _hide_settings())
+	save.pressed.connect(func():
+		cfg.set_value("audio", "volume", volume.value)
+		cfg.set_value("input", "sensitivity", sensitivity.value)
+		cfg.set_value("accessibility", "colorblind", colorblind_check.button_pressed)
+		cfg.save("user://settings.cfg")
+		AudioServer.set_bus_volume_linear(0, volume.value)
+		if game != null and game.has_method("_apply_accessibility"):
+			game.call("_apply_accessibility")
+		_hide_settings()
+	)
 	var back := Button.new(); back.text = "Back"; settings_box.add_child(back); back.pressed.connect(_hide_settings)
 
 func _hide_settings() -> void:

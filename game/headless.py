@@ -52,11 +52,13 @@ class Sim:
     def __init__(self, seed, scenario, night=1):
         self.rng = random.Random(seed); self.tick = 0; self.sim_tick = 0; self.state = "playing"; self.score = 0
         self.night = night
-        duration = T["night1_duration_s"] if night == 1 else T["night2_duration_s"] if night == 2 else T["night3_duration_s"]
+        duration = T.get(f"night{night}_duration_s", 240 if night==1 else (270 if night==2 else 300))
         self.time_left = float(scenario.get("time_left_s", duration))
         p = scenario.get("player", {})
         default_start = MAP_STARTS[night]
         self.player = {"pos": list(p.get("pos", default_start)), "flames": int(p.get("flames", T["flames"])), "carried": int(p.get("carried", 0))}
+        self.successful_lights = int(p.get("successful_lights", 0))
+        self.capacity = min(T.get("capacity_max", 20), 10 + 2 * self.successful_lights)
         self.random_motes = bool(scenario.get("random_motes", True))
         self.random_shades = bool(scenario.get("random_shades", True))
         if "motes" in scenario:
@@ -67,19 +69,39 @@ class Sim:
             initial_motes = []
         self.motes = [[*x, f"M{i+1}", "random", None] for i,x in enumerate(initial_motes)]
         if len(self.motes)>30: self.motes=self.motes[:30]
-        self.shades = [{"id": x.get("id", f"S{i+1}"), "pos": list(x["pos"]), "state":x.get("state","wander"), "stun":int(x.get("state_ticks_left",0)) if x.get("state")=="stunned" else 0,"spawn":int(x.get("state_ticks_left",0)) if x.get("state")=="spawning" else 0,"state_ticks":int(x.get("state_ticks_left",0)),"push_ticks":0,"push_dir":[1.0,0.0]} for i,x in enumerate(scenario.get("shades", []))]
+        self.shades = [{
+            "id": x.get("id", f"S{i+1}"),
+            "pos": list(x["pos"]),
+            "state": x.get("state", "wander"),
+            "stun": int(x.get("state_ticks_left", 0)) if x.get("state") == "stunned" else 0,
+            "spawn": int(x.get("state_ticks_left", 0)) if x.get("state") == "spawning" else 0,
+            "state_ticks": int(x.get("state_ticks_left", 0)),
+            "push_ticks": 0,
+            "push_dir": [1.0, 0.0],
+            "target_lantern_id": x.get("target_lantern_id", None),
+            "drain_ticks": 0,
+        } for i, x in enumerate(scenario.get("shades", []))]
         self.drifters = [{"id": x.get("id", f"D{i+1}"), "pos": list(x["pos"]), "state":x.get("state","idle"), "stolen":int(x.get("stolen",0)),"flee_ticks":int(x.get("state_ticks_left",0)),"robbed":bool(x.get("robbed",False))} for i,x in enumerate(scenario.get("drifters", []))]
         defaults = ({2:[[35,0,0]],3:[[30,0,25],[-30,0,25]]}.get(night, []))
         charm_data = scenario.get("charms", [{"id":f"C{i+1}","pos":p} for i,p in enumerate(defaults)])
         self.charms = [{"id": x.get("id", f"C{i+1}"), "pos": list(x.get("pos",[0,0,0])), "available":bool(x.get("available",True)), "respawn":int(x.get("respawn_ticks",0))} for i,x in enumerate(charm_data)]
         default_lanterns = MAP_LANTERNS.get(night, MAP_LANTERNS[1])
-        self.lanterns = [{"id":f"L{i+1}","pos":list(p),"deposited":0,"lit":False} for i,p in enumerate(default_lanterns)]
+        self.lanterns = [{"id":f"L{i+1}","pos":list(p),"deposited":0,"lit":False,"ever_lit":False,"relit_count":0,"fuel_ticks":0} for i,p in enumerate(default_lanterns)]
         for override in scenario.get("lanterns",[]):
             lamp=next((x for x in self.lanterns if x["id"]==override.get("id")),None)
             if lamp is not None:
                 if "pos" in override: lamp["pos"]=list(override["pos"])
                 if "deposited" in override: lamp["deposited"]=int(override["deposited"])
                 if "lit" in override: lamp["lit"]=bool(override["lit"])
+                if "ever_lit" in override: lamp["ever_lit"]=bool(override["ever_lit"])
+                elif lamp["lit"]: lamp["ever_lit"]=True
+                if "relit_count" in override: lamp["relit_count"]=int(override["relit_count"])
+                if lamp["lit"]:
+                    fuel_val = float(override.get("fuel", 100))
+                    lamp["fuel_ticks"] = int(round(fuel_val * 60))
+                else:
+                    fuel_val = float(override.get("fuel", 0))
+                    lamp["fuel_ticks"] = int(round(fuel_val * 60))
         self.events=[]; self.last_pulse=-999999; self.last_dash=-999999; self.dash_ticks=0; self.dash_dir=[0,0]; self.invuln=0; self.paused=False; self.charm_ticks=0; self.jump_vel=0.0; self.grounded=True
         self.wind_dir=0.0; self.wind_active=False
         self.random_drifters = bool(scenario.get("random_drifters", True))
@@ -106,8 +128,8 @@ class Sim:
     def event(self, name, data): self.events.append({"type":"event","tick":self.tick,"name":name,"data":data})
     def snapshot(self):
         return {"type":"snapshot","tick":self.tick,"sim_tick":self.sim_tick,"night":self.night,"state":self.state,"time_left_s":round(self.time_left,3),"score":self.score,"wind":{"active":self.wind_active,"dir_deg":round(self.wind_dir,3)},
-          "player":{"pos":pos(self.player["pos"]),"vel":[round(self.horizontal_vel[0],3),round(self.jump_vel,3),round(self.horizontal_vel[1],3)],"grounded":self.grounded,"flames":self.player["flames"],"carried":self.player["carried"],"invuln":self.invuln>0,"dash_cd_s":round(self.dash_cd/60,3),"pulse_cd_s":round(self.pulse_cd/60,3),"charm_s":self.charm_ticks/60},
-          "lanterns":[{"id":x["id"],"pos":pos(x["pos"]),"lit":x["lit"],"deposited":x["deposited"]} for x in self.lanterns],
+          "player":{"pos":pos(self.player["pos"]),"vel":[round(self.horizontal_vel[0],3),round(self.jump_vel,3),round(self.horizontal_vel[1],3)],"grounded":self.grounded,"flames":self.player["flames"],"carried":self.player["carried"],"capacity":self.capacity,"invuln":self.invuln>0,"dash_cd_s":round(self.dash_cd/60,3),"pulse_cd_s":round(self.pulse_cd/60,3),"charm_s":self.charm_ticks/60},
+          "lanterns":[{"id":x["id"],"pos":pos(x["pos"]),"lit":x["lit"],"deposited":x["deposited"],"fuel":round(x["fuel_ticks"]/60.0,1) if x["lit"] else 0.0,"ever_lit":x["ever_lit"],"relit_count":x["relit_count"]} for x in self.lanterns],
           "shades":[{"id":x["id"],"pos":pos(x["pos"]),"state":"stunned" if x["stun"]>0 else x["state"]} for x in self.shades],
           "drifters":[{"id":x["id"],"pos":pos(x["pos"]),"state":x["state"],"stolen":x["stolen"]} for x in self.drifters],
           "charms":[{"id":x["id"],"available":x["available"],"respawn_s":round(x["respawn"]/60,3)} for x in self.charms],
@@ -115,7 +137,7 @@ class Sim:
     def emit_shade_spawn(self, point):
         shade_id = f"S{self.next_shade_id}"
         self.next_shade_id += 1
-        self.shades.append({"id":shade_id,"pos":list(point),"state":"spawning","stun":0,"spawn":60,"state_ticks":60,"push_ticks":0,"push_dir":[1.0,0.0]})
+        self.shades.append({"id":shade_id,"pos":list(point),"state":"spawning","stun":0,"spawn":60,"state_ticks":60,"push_ticks":0,"push_dir":[1.0,0.0],"target_lantern_id":None,"drain_ticks":0})
         self.event("shade_spawned", {"id":shade_id})
     def step(self, inp):
         self.tick += 1
@@ -148,6 +170,35 @@ class Sim:
             if m[5] is not None: m[5]-=1
         for s in self.shades:
             if s["stun"]>0: s["stun"]-=1
+
+        # Step 2: Fuel decay and drain
+        for lamp in self.lanterns:
+            if lamp["lit"]:
+                lamp["fuel_ticks"] = max(0, lamp["fuel_ticks"] - 1)
+                draining = [s for s in self.shades if s["state"] == "drain" and s.get("target_lantern_id") == lamp["id"]]
+                for s in draining:
+                    lamp["fuel_ticks"] = max(0, lamp["fuel_ticks"] - 5)
+                    s["drain_ticks"] += 1
+                    if s["drain_ticks"] % 60 == 0:
+                        self.event("fuel_drain", {
+                            "lantern_id": lamp["id"],
+                            "shade_id": s["id"],
+                            "fuel": round(lamp["fuel_ticks"] / 60.0, 1)
+                        })
+        # Immediately check fuel <= 0
+        for lamp in self.lanterns:
+            if lamp["lit"] and lamp["fuel_ticks"] <= 0:
+                lamp["lit"] = False
+                lamp["deposited"] = 0
+                lamp["fuel_ticks"] = 0
+                lamp["ever_lit"] = True
+                self.event("lantern_out", {"lantern_id": lamp["id"]})
+                for s in self.shades:
+                    if s.get("target_lantern_id") == lamp["id"] and s["state"] == "drain":
+                        s["state"] = "wander"
+                        s["target_lantern_id"] = None
+                        s["drain_ticks"] = 0
+
         old_x,old_z=self.player["pos"][0],self.player["pos"][2]
         was_grounded=self.grounded
         old_floor=terrain_height(self.night,old_x,old_z)
@@ -218,22 +269,88 @@ class Sim:
                 self.invuln=90
         for m in self.motes[:]:
             if m[5] is not None and m[5]<=0: self.motes.remove(m); continue
-            if self.respawn_ticks<=0 and self.player["carried"] < T["carry_capacity"] and dist(self.player["pos"],m[:3])<=T["pickup_radius"] and abs(self.player["pos"][1]-m[1])<=1.5:
+            if self.respawn_ticks<=0 and self.player["carried"] < self.capacity and dist(self.player["pos"],m[:3])<=T["pickup_radius"] and abs(self.player["pos"][1]-m[1])<=1.5:
                 self.motes.remove(m); self.player["carried"]+=1; self.event("mote_picked",{"carried":self.player["carried"]})
         for c in self.charms:
             if self.respawn_ticks<=0 and c["available"] and dist(self.player["pos"],c["pos"])<=T["pickup_radius"] and abs(self.player["pos"][1]-c["pos"][1])<=1.5:
                 c["available"]=False; c["respawn"]=2700; self.charm_ticks=600; self.event("charm_picked",{"charm_id":c["id"],"charm_ticks":self.charm_ticks})
-        if self.respawn_ticks<=0 and self.buttons.get("interact") and not old.get("interact") and self.player["carried"]:
-            candidates=[l for l in self.lanterns if not l["lit"] and dist(self.player["pos"],l["pos"])<=T["interact_radius"]]
+
+        # Interact: Deposit or Refuel
+        if self.respawn_ticks<=0 and self.buttons.get("interact") and not old.get("interact") and self.player["carried"]>0:
+            candidates = []
+            for l in self.lanterns:
+                if dist(self.player["pos"], l["pos"]) <= T["interact_radius"]:
+                    if not l["lit"]:
+                        candidates.append(l)
+                    else:
+                        fuel_val = l["fuel_ticks"] / 60.0
+                        needed = math.ceil((100.0 - fuel_val) / 10.0)
+                        if needed > 0:
+                            candidates.append(l)
             candidates.sort(key=lambda l:(dist(self.player["pos"],l["pos"]),l["id"]))
             if candidates:
-                l=candidates[0]; amount=min(self.player["carried"],T["lantern_cost"]-l["deposited"]); l["deposited"]+=amount; self.player["carried"]-=amount; self.score+=amount*T["score"]["per_mote"]; self.event("deposit",{"lantern_id":l["id"],"amount":amount,"deposited":l["deposited"]})
-                if l["deposited"]>=T["lantern_cost"]: l["lit"]=True; self.score+=T["score"]["per_lantern"]; self.event("lantern_lit",{"lantern_id":l["id"]})
+                l = candidates[0]
+                if not l["lit"]:
+                    cost = T["relight_cost"] if l["ever_lit"] else T["lantern_cost"]
+                    amount = min(self.player["carried"], cost - l["deposited"])
+                    l["deposited"] += amount
+                    self.player["carried"] -= amount
+                    self.score += amount * T["score"]["per_mote"]
+                    self.event("deposit", {"lantern_id": l["id"], "amount": amount, "deposited": l["deposited"]})
+                    if l["deposited"] >= cost:
+                        l["lit"] = True
+                        l["fuel_ticks"] = 6000
+                        is_relight = l["ever_lit"]
+                        l["ever_lit"] = True
+                        if is_relight:
+                            l["relit_count"] += 1
+                            self.score += T["score"]["per_lantern_relight"]
+                        else:
+                            self.score += T["score"]["per_lantern_initial"]
+                        self.successful_lights += 1
+                        self.capacity = min(T["capacity_max"], 10 + 2 * self.successful_lights)
+                        self.event("lantern_lit", {"lantern_id": l["id"], "relight": is_relight})
+                        # Push shades in 6m safe zone
+                        for s in self.shades:
+                            sd = dist(s["pos"], l["pos"])
+                            if sd < T["safe_radius"]:
+                                dx = s["pos"][0] - l["pos"][0]; dz = s["pos"][2] - l["pos"][2]
+                                ln = math.hypot(dx, dz) or 1
+                                s["pos"][0] = l["pos"][0] + dx/ln * T["safe_radius"]
+                                s["pos"][2] = l["pos"][2] + dz/ln * T["safe_radius"]
+                                if s["state"] == "drain" and s.get("target_lantern_id") == l["id"]:
+                                    s["state"] = "wander"; s["target_lantern_id"] = None; s["drain_ticks"] = 0
+                else:
+                    fuel_val = l["fuel_ticks"] / 60.0
+                    needed = math.ceil((100.0 - fuel_val) / 10.0)
+                    used = min(self.player["carried"], needed)
+                    if used > 0:
+                        was_low = l["fuel_ticks"] < 1800
+                        self.player["carried"] -= used
+                        l["fuel_ticks"] = min(6000, l["fuel_ticks"] + used * 10 * 60)
+                        self.score += used * T["score"]["per_mote"]
+                        new_fuel = round(l["fuel_ticks"] / 60.0, 1)
+                        self.event("refuel", {"lantern_id": l["id"], "amount": used, "fuel": new_fuel})
+                        if was_low and l["fuel_ticks"] >= 1800:
+                            for s in self.shades:
+                                if s.get("target_lantern_id") == l["id"] and s["state"] == "drain":
+                                    s["state"] = "wander"; s["target_lantern_id"] = None; s["drain_ticks"] = 0
+                                sd = dist(s["pos"], l["pos"])
+                                if sd < T["safe_radius"]:
+                                    dx = s["pos"][0] - l["pos"][0]; dz = s["pos"][2] - l["pos"][2]
+                                    ln = math.hypot(dx, dz) or 1
+                                    s["pos"][0] = l["pos"][0] + dx/ln * T["safe_radius"]
+                                    s["pos"][2] = l["pos"][2] + dz/ln * T["safe_radius"]
+
+        # Pulse
         if self.respawn_ticks<=0 and self.buttons.get("pulse") and not old.get("pulse") and self.player["carried"]>=T["pulse_cost"] and self.tick-self.last_pulse>=T["pulse_cooldown_s"]*60:
             self.player["carried"]-=T["pulse_cost"]; self.last_pulse=self.tick; self.pulse_cd=int(T["pulse_cooldown_s"]*60); stunned=[]
             for s in self.shades:
                 if dist3([self.player["pos"][0],self.player["pos"][1]+0.8,self.player["pos"][2]],s["pos"])<=T["pulse_radius"]:
-                    s["stun"]=int(T["pulse_stun_s"]*60); s["state"]="stunned"; stunned.append(s["id"]); self.score+=T["score"]["per_stun"]
+                    was_drain = (s["state"] == "drain")
+                    s["stun"]=int(T["pulse_stun_s"]*60); s["state"]="stunned"; stunned.append(s["id"])
+                    s["drain_ticks"] = 0
+                    self.score += T["score"]["per_stun_drain"] if was_drain else T["score"]["per_stun"]
                     dx=s["pos"][0]-self.player["pos"][0]; dz=s["pos"][2]-self.player["pos"][2]; length=math.hypot(dx,dz)
                     s["push_dir"]=[dx/length,dz/length] if length else [1.0,0.0]
                     s["push_ticks"]=15
@@ -247,6 +364,7 @@ class Sim:
                         self.event("drifter_drop",{"drifter_id":d["id"],"amount":d["stolen"]})
                         d["stolen"]=0; d["state"]="flee"; d["flee_ticks"]=121
             self.event("pulse",{"stunned_ids":stunned})
+
         for d in self.drifters:
             if d["state"]=="removed": continue
             if d["state"]=="idle" and self.player["carried"]>=5 and dist(self.player["pos"],d["pos"])<=15: d["state"]="chase"
@@ -260,6 +378,8 @@ class Sim:
                 d["pos"][0]+=dx/ln*sp/60; d["pos"][2]+=dz/ln*sp/60
             if d["state"]=="chase" and not d["robbed"] and dist(self.player["pos"],d["pos"])<=1.2:
                 amount=min(3,self.player["carried"]); self.player["carried"]-=amount; d["stolen"]+=amount; d["robbed"]=True; d["state"]="flee"; d["flee_ticks"]=240; self.event("drifter_steal",{"drifter_id":d["id"],"amount":amount,"carried":self.player["carried"]})
+
+        # Shades update
         for s in self.shades:
             if s["spawn"]>0 or s["state"]=="spawning":
                 if s["spawn"]<=0: s["spawn"]=60
@@ -273,26 +393,74 @@ class Sim:
                     s["push_ticks"]-=1
                 s["stun"]-=1; s["state"]="stunned"; continue
             if s["state"]=="stunned": s["state"]="wander"
+
             d=dist(self.player["pos"],s["pos"])
-            if d<=12: s["state"]="chase"
-            elif d>=18: s["state"]="wander"
-            shade_speed=4.5 if self.night==3 else T["shade_speed"]
-            if s["state"]=="chase" and d>0: s["pos"][0]+=(self.player["pos"][0]-s["pos"][0])/d*shade_speed/60; s["pos"][2]+=(self.player["pos"][2]-s["pos"][2])/d*shade_speed/60
+            if s["state"] == "drain":
+                if d <= 6.0:
+                    s["state"] = "chase"; s["target_lantern_id"] = None; s["drain_ticks"] = 0
+                else:
+                    tgt = next((l for l in self.lanterns if l["id"] == s.get("target_lantern_id")), None)
+                    if not tgt or not tgt["lit"] or tgt["fuel_ticks"] >= 1800 or dist(s["pos"], tgt["pos"]) > 2.0:
+                        s["state"] = "wander"; s["target_lantern_id"] = None; s["drain_ticks"] = 0
+                continue
+
+            if s["state"] == "wander":
+                if d <= 12.0:
+                    s["state"] = "chase"; s["target_lantern_id"] = None
+                else:
+                    weak_lit = [l for l in self.lanterns if l["lit"] and l["fuel_ticks"] < 1800]
+                    if weak_lit:
+                        weak_lit.sort(key=lambda l: (dist(s["pos"], l["pos"]), l["id"]))
+                        target = weak_lit[0]
+                    else:
+                        unlit = [l for l in self.lanterns if not l["lit"]]
+                        if unlit:
+                            unlit.sort(key=lambda l: (dist(s["pos"], l["pos"]), l["id"]))
+                            target = unlit[0]
+                        else:
+                            target = None
+                    if target is not None:
+                        s["target_lantern_id"] = target["id"]
+                        td = dist(s["pos"], target["pos"])
+                        shade_speed = 4.5 if self.night == 3 else T["shade_speed"]
+                        if td > 0.001:
+                            s["pos"][0] += (target["pos"][0] - s["pos"][0]) / td * shade_speed / 60
+                            s["pos"][2] += (target["pos"][2] - s["pos"][2]) / td * shade_speed / 60
+                        if target["lit"] and target["fuel_ticks"] < 1800 and dist(s["pos"], target["pos"]) <= 2.0:
+                            s["state"] = "drain"
+                            s["drain_ticks"] = 0
+            elif s["state"] == "chase":
+                if d >= 18.0:
+                    s["state"] = "wander"
+                else:
+                    shade_speed = 4.5 if self.night == 3 else T["shade_speed"]
+                    if d > 0.001:
+                        s["pos"][0] += (self.player["pos"][0] - s["pos"][0]) / d * shade_speed / 60
+                        s["pos"][2] += (self.player["pos"][2] - s["pos"][2]) / d * shade_speed / 60
+
+            # Safe zone push for lanterns with fuel >= 30
             for lit in self.lanterns:
-                safe_dist=dist(s["pos"],lit["pos"])
-                if lit["lit"] and safe_dist<T["safe_radius"]:
-                    dx=s["pos"][0]-lit["pos"][0]; dz=s["pos"][2]-lit["pos"][2]; ln=math.hypot(dx,dz) or 1
-                    s["pos"][0]=lit["pos"][0]+dx/ln*T["safe_radius"]; s["pos"][2]=lit["pos"][2]+dz/ln*T["safe_radius"]
-            d=dist(self.player["pos"],s["pos"])
-            if d<=T["shade_hit_radius"] and abs(self.player["pos"][1]-s["pos"][1])<=1.5 and self.invuln<=0 and self.respawn_ticks<=0 and s["spawn"]==0:
-                self.player["flames"]-=1; dropped=math.floor(self.player["carried"]/2); self.player["carried"]-=dropped
-                dx=self.player["pos"][0]-s["pos"][0]; dz=self.player["pos"][2]-s["pos"][2]; length=math.hypot(dx,dz)
-                self.recoil_dir=[dx/length,dz/length] if length else [1.0,0.0]
-                self.recoil_ticks=61
+                if lit["lit"] and lit["fuel_ticks"] >= 1800:
+                    safe_dist = dist(s["pos"], lit["pos"])
+                    if safe_dist < T["safe_radius"]:
+                        dx = s["pos"][0] - lit["pos"][0]; dz = s["pos"][2] - lit["pos"][2]
+                        ln = math.hypot(dx, dz) or 1
+                        s["pos"][0] = lit["pos"][0] + dx/ln * T["safe_radius"]
+                        s["pos"][2] = lit["pos"][2] + dz/ln * T["safe_radius"]
+
+            d = dist(self.player["pos"], s["pos"])
+            if d <= T["shade_hit_radius"] and abs(self.player["pos"][1] - s["pos"][1]) <= 1.5 and self.invuln <= 0 and self.respawn_ticks <= 0 and s["spawn"] == 0:
+                self.player["flames"] -= 1; dropped = math.floor(self.player["carried"] / 2); self.player["carried"] -= dropped
+                dx = self.player["pos"][0] - s["pos"][0]; dz = self.player["pos"][2] - s["pos"][2]; length = math.hypot(dx, dz)
+                self.recoil_dir = [dx/length, dz/length] if length else [1.0, 0.0]
+                self.recoil_ticks = 61
                 if dropped:
                     for _ in range(dropped):
-                        angle=self.rng.random()*math.tau; radius=1.5+self.rng.random(); self.motes.append([self.player["pos"][0]+math.cos(angle)*radius,0,self.player["pos"][2]+math.sin(angle)*radius,f"M{self.next_mote_id}","dropped",480]); self.next_mote_id+=1
-                self.invuln=90; self.event("player_hit",{"by":"shade","flames":self.player["flames"],"dropped":dropped})
+                        angle = self.rng.random() * math.tau; radius = 1.5 + self.rng.random()
+                        self.motes.append([self.player["pos"][0] + math.cos(angle)*radius, 0, self.player["pos"][2] + math.sin(angle)*radius, f"M{self.next_mote_id}", "dropped", 480])
+                        self.next_mote_id += 1
+                self.invuln = 90; self.event("player_hit", {"by": "shade", "flames": self.player["flames"], "dropped": dropped})
+
         if self.random_motes and self.sim_tick>0 and self.sim_tick%240==0 and len(self.motes)<30:
             points=map_mote_points(self.night); occupied=[tuple(round(v,2) for v in m[:3]) for m in self.motes]
             free=[p for p in points if tuple(round(v,2) for v in p) not in occupied]
@@ -312,13 +480,30 @@ class Sim:
                 if len(self.shades)>=(6,8,10)[self.night-1]: break
                 valid=[p for p in MAP_SHADE_POINTS[self.night] if dist(p,self.player["pos"])>=15]
                 if valid: self.emit_shade_spawn(self.rng.choice(valid))
-        if self.player["flames"]<=0: self.state="lost"; self.event("game_over",{"result":"lost","reason":"no_flames"})
-        elif all(x["lit"] for x in self.lanterns): self.state="won"; self.score+=math.floor(self.time_left)*T["score"]["per_second_left"]+self.player["flames"]*T["score"]["per_flame_left"]; self.event("game_over",{"result":"won","reason":"all_lit"})
-        elif self.time_left<=0: self.state="lost"; self.event("game_over",{"result":"lost","reason":"dawn"})
+
+        # Win/Loss check at end of tick
+        if self.player["flames"] <= 0:
+            self.state = "lost"
+            self.event("game_over", {"result": "lost", "reason": "no_flames"})
+        elif self.time_left <= 0:
+            lit_count = sum(1 for l in self.lanterns if l["lit"])
+            total_count = len(self.lanterns)
+            needed = math.ceil(T["win_ratio"] * total_count)
+            if lit_count >= needed:
+                self.state = "won"
+                for l in self.lanterns:
+                    if l["lit"]:
+                        fuel_floor = math.floor(l["fuel_ticks"] / 60.0)
+                        self.score += T["score"]["per_lantern_lit"] + fuel_floor
+                self.score += self.player["flames"] * T["score"]["per_flame_left"]
+                self.event("game_over", {"result": "won", "reason": "dawn_survived"})
+            else:
+                self.state = "lost"
+                self.event("game_over", {"result": "lost", "reason": "dawn"})
+
     def run(self, ticks, inputs, every):
         frames={x["tick"]:x for x in inputs}; out=[self.snapshot()]
         while self.tick<ticks and self.state=="playing": self.step(frames.get(self.tick,{})); out.extend(self.events); self.events=[]; 
-        # snapshots and events are emitted in simulation order; snapshots are deterministic checkpoints.
         return out
 
 def main():
@@ -336,9 +521,10 @@ def main():
         player=scenario.get("player",{})
         if not isinstance(player,dict): raise ValueError("scenario player must be an object")
         if "pos" in player and not valid_pos(player["pos"]): raise ValueError("player.pos must contain three finite numbers")
-        for key in ("carried","flames","invuln_ticks","dash_cd_ticks","pulse_cd_ticks","charm_ticks"):
+        for key in ("carried","flames","invuln_ticks","dash_cd_ticks","pulse_cd_ticks","charm_ticks","successful_lights"):
             if key in player and (not isinstance(player[key],int) or isinstance(player[key],bool) or player[key]<0): raise ValueError(f"player.{key} must be a nonnegative integer")
-        if player.get("carried",0)>T["carry_capacity"]: raise ValueError("player.carried exceeds carry_capacity")
+        capacity = min(T.get("capacity_max", 20), 10 + 2 * int(player.get("successful_lights", 0)))
+        if player.get("carried",0)>capacity: raise ValueError("player.carried exceeds carry_capacity")
         if "time_left_s" in scenario and (not isinstance(scenario["time_left_s"],(int,float)) or not math.isfinite(scenario["time_left_s"]) or scenario["time_left_s"]<0): raise ValueError("time_left_s must be a nonnegative finite number")
         for flag in ("random_motes","random_shades","random_drifters","wind_enabled"):
             if flag in scenario and not isinstance(scenario[flag],bool): raise ValueError(f"{flag} must be boolean")
@@ -350,7 +536,7 @@ def main():
             for item in scenario.get(key,[]):
                 if not isinstance(item,dict): raise ValueError(f"each {key} item must be an object")
                 if "pos" in item and not valid_pos(item["pos"]): raise ValueError(f"each {key}.pos must contain three finite numbers")
-        if any(x.get("state","wander") not in {"spawning","wander","chase","recoil","stunned"} for x in scenario.get("shades",[])): raise ValueError("invalid shade state")
+        if any(x.get("state","wander") not in {"spawning","wander","chase","drain","recoil","stunned"} for x in scenario.get("shades",[])): raise ValueError("invalid shade state")
         if any(x.get("state","idle") not in {"idle","chase","flee","removed"} for x in scenario.get("drifters",[])): raise ValueError("invalid drifter state")
         previous=-1
         for frame in inputs:

@@ -17,6 +17,13 @@ var won := false
 var lost := false
 var outcome_awarded := false
 var hud: Label
+var lantern_fuel: Array[float] = []
+var lantern_ever_lit: Array[bool] = []
+var lantern_relit_count: Array[int] = []
+var lantern_fuel_bars: Array[MeshInstance3D] = []
+var successful_lights: int = 0
+var capacity: int = 10
+var colorblind_mode: bool = false
 var dash_time := 0.0
 var dash_cooldown := 0.0
 var dash_direction := Vector3.FORWARD
@@ -64,8 +71,11 @@ func _ready() -> void:
 	for i in args.size():
 		if args[i] == "--night" and i + 1 < args.size(): night = clampi(int(args[i + 1]), 1, 3)
 	night_name = ["", "Đêm 1 — Đảo Bến", "Đêm 2 — Đảo Cau", "Đêm 3 — Đảo Chuông"][night]
-	time_left = [0.0,300.0,330.0,360.0][night]
+	time_left = [0.0, 240.0, 270.0, 300.0][night]
 	player = Vector3(0, 0, -15) if night == 3 else Vector3.ZERO
+	var settings_cfg := ConfigFile.new()
+	if settings_cfg.load("user://settings.cfg") == OK:
+		colorblind_mode = bool(settings_cfg.get_value("accessibility", "colorblind", false))
 	_setup_world()
 	_setup_charms()
 	_register_gameplay_actions()
@@ -73,6 +83,7 @@ func _ready() -> void:
 	var ui = ui_script.new()
 	ui.name = "Phase2UI"
 	add_child(ui)
+	_apply_accessibility()
 	_update_hud()
 
 func _physics_process(delta: float) -> void:
@@ -116,6 +127,34 @@ func _advance_counters() -> void:
 		if mote_ttl_ticks[i] > 0:
 			mote_ttl_ticks[i] -= 1
 			if mote_ttl_ticks[i] == 0: _remove_mote(i)
+	for i in lanterns.size():
+		if lantern_progress[i] >= 10:
+			var drain_count := 0
+			for shade_data in shade_states:
+				if shade_data.get("state") == "drain" and shade_data.get("target_lantern_id") == ("L%d" % (i + 1)):
+					drain_count += 1
+			lantern_fuel[i] = maxf(0.0, lantern_fuel[i] - (1.0 + 5.0 * float(drain_count)) * (1.0 / 60.0))
+			if lantern_fuel[i] <= 0.0:
+				lantern_progress[i] = 0
+				lantern_fuel[i] = 0.0
+				lantern_ever_lit[i] = true
+				lanterns[i].get_child(0).light_energy = 0.0
+				world_environment.environment.ambient_light_energy = 0.15 + 0.55 * float(lantern_progress.count(10)) / float(lantern_progress.size())
+				for shade_data in shade_states:
+					if shade_data.get("state") == "drain" and shade_data.get("target_lantern_id") == ("L%d" % (i + 1)):
+						shade_data["state"] = "wander"; shade_data["target_lantern_id"] = ""
+			if i < lantern_fuel_bars.size() and is_instance_valid(lantern_fuel_bars[i]):
+				var bar: MeshInstance3D = lantern_fuel_bars[i]
+				bar.visible = lantern_progress[i] >= 10
+				bar.scale.x = maxf(0.01, lantern_fuel[i] / 100.0)
+				if lantern_fuel[i] < 30.0:
+					lanterns[i].visible = fposmod(float(sim_tick) / 60.0, 1.0) < 0.5
+				else:
+					lanterns[i].visible = true
+		else:
+			if i < lantern_fuel_bars.size() and is_instance_valid(lantern_fuel_bars[i]):
+				lantern_fuel_bars[i].visible = false
+			lanterns[i].visible = true
 	for charm in charm_states:
 		if not charm["available"]:
 			charm["respawn_ticks"] -= 1
@@ -292,6 +331,17 @@ func _setup_world() -> void:
 		lamp.add_child(lamp_light)
 		lanterns.append(lamp)
 		lantern_progress.append(0)
+		lantern_fuel.append(0.0)
+		lantern_ever_lit.append(false)
+		lantern_relit_count.append(0)
+		var fuel_bar := MeshInstance3D.new()
+		var bar_mesh := BoxMesh.new(); bar_mesh.size = Vector3(1.0, 0.1, 0.1)
+		fuel_bar.mesh = bar_mesh
+		fuel_bar.material_override = _material(Color("00B3FF") if colorblind_mode else Color("FFB347"))
+		fuel_bar.position = Vector3(0, 1.3, 0)
+		fuel_bar.visible = false
+		lamp.add_child(fuel_bar)
+		lantern_fuel_bars.append(fuel_bar)
 	var initial_points := _initial_mote_positions()
 	if night == 1: initial_points.resize(20)
 	for mote_position in initial_points:
@@ -410,8 +460,9 @@ func _activate_pulse() -> void:
 	var center := player + Vector3.UP * 0.8
 	for shade_data in shade_states:
 		if shade_data.state == "removed" or shade_data.spawn_ticks > 0 or center.distance_to(shade_data.node.position) > 5.0: continue
+		var was_drain: bool = (shade_data.get("state") == "drain")
 		shade_data.stun_ticks = 120; shade_data.state = "stunned"; shade_data.push_ticks = 15
-		score += 5
+		score += 15 if was_drain else 5
 		var away: Vector3 = shade_data.node.position - player; away.y = 0.0
 		shade_data.push_dir = away.normalized() if away.length_squared() > 0.0001 else Vector3.RIGHT
 	for drifter in drifter_states:
@@ -435,16 +486,51 @@ func _step_shades(delta: float) -> void:
 			continue
 		var to_player: Vector3 = player - shade_data.node.position; to_player.y = 0.0
 		var distance: float = to_player.length()
+		if shade_data.state == "drain":
+			if distance <= 6.0:
+				shade_data.state = "chase"; shade_data["target_lantern_id"] = ""
+			else:
+				var target_idx := -1
+				for i in lanterns.size():
+					if ("L%d" % (i + 1)) == shade_data.get("target_lantern_id", ""): target_idx = i; break
+				if target_idx < 0 or lantern_progress[target_idx] < 10 or lantern_fuel[target_idx] >= 30.0 or Vector2(shade_data.node.position.x - lanterns[target_idx].position.x, shade_data.node.position.z - lanterns[target_idx].position.z).length() > 2.0:
+					shade_data.state = "wander"; shade_data["target_lantern_id"] = ""
+			continue
 		if shade_data.state == "recoil":
 			shade_data.node.position += shade_data.recoil_dir * 2.0 * delta; shade_data.recoil_ticks -= 1
 			if shade_data.recoil_ticks <= 0: shade_data.state = "chase" if distance <= 18.0 else "wander"
-		elif distance <= 12.0: shade_data.state = "chase"
-		elif distance > 18.0: shade_data.state = "wander"
+		elif distance <= 12.0:
+			shade_data.state = "chase"; shade_data["target_lantern_id"] = ""
+		elif distance > 18.0 and shade_data.state == "chase":
+			shade_data.state = "wander"
+		if shade_data.state == "wander":
+			var chosen_target := -1
+			var chosen_target_dist := INF
+			for i in lanterns.size():
+				if lantern_progress[i] >= 10 and lantern_fuel[i] < 30.0:
+					var ld := Vector2(shade_data.node.position.x - lanterns[i].position.x, shade_data.node.position.z - lanterns[i].position.z).length()
+					if ld < chosen_target_dist: chosen_target = i; chosen_target_dist = ld
+			if chosen_target < 0:
+				for i in lanterns.size():
+					if lantern_progress[i] < 10:
+						var ld := Vector2(shade_data.node.position.x - lanterns[i].position.x, shade_data.node.position.z - lanterns[i].position.z).length()
+						if ld < chosen_target_dist: chosen_target = i; chosen_target_dist = ld
+			if chosen_target >= 0:
+				shade_data["target_lantern_id"] = "L%d" % (chosen_target + 1)
+				var target_pos: Vector3 = lanterns[chosen_target].position
+				var to_tgt := Vector2(target_pos.x - shade_data.node.position.x, target_pos.z - shade_data.node.position.z)
+				var speed: float = 4.5 if night == 3 else 4.0
+				if to_tgt.length() > 0.001:
+					var step_vec := to_tgt.normalized() * speed * delta
+					shade_data.node.position.x += step_vec.x
+					shade_data.node.position.z += step_vec.y
+				if lantern_progress[chosen_target] >= 10 and lantern_fuel[chosen_target] < 30.0 and to_tgt.length() <= 2.0:
+					shade_data.state = "drain"
 		if shade_data.state == "chase" and distance > 0.001:
 			var candidate: Vector3 = shade_data.node.position + to_player.normalized() * (4.5 if night == 3 else 4.0) * delta
 			var blocked := false
 			for lamp_i in lanterns.size():
-				if lantern_progress[lamp_i] < 10: continue
+				if lantern_progress[lamp_i] < 10 or lantern_fuel[lamp_i] < 30.0: continue
 				var lamp_pos: Vector3 = lanterns[lamp_i].position
 				var candidate_offset := Vector2(candidate.x-lamp_pos.x, candidate.z-lamp_pos.z)
 				if candidate_offset.length() < 6.0:
@@ -614,49 +700,96 @@ func _collect_or_deposit() -> void:
 	var chosen := -1
 	var chosen_distance := INF
 	for idx in lanterns.size():
-		if lantern_progress[idx] >= 10: continue
 		var lamp: MeshInstance3D = lanterns[idx]
 		var distance := Vector2(lamp.position.x - player.x, lamp.position.z - player.z).length()
-		if distance <= 2.0 and (distance < chosen_distance or (is_equal_approx(distance, chosen_distance) and idx < chosen)):
-			chosen = idx
-			chosen_distance = distance
+		if distance <= 2.0:
+			if lantern_progress[idx] < 10:
+				if distance < chosen_distance or (is_equal_approx(distance, chosen_distance) and idx < chosen):
+					chosen = idx; chosen_distance = distance
+			elif lantern_fuel[idx] < 100.0:
+				var needed := int(ceil((100.0 - lantern_fuel[idx]) / 10.0))
+				if needed > 0 and (distance < chosen_distance or (is_equal_approx(distance, chosen_distance) and idx < chosen)):
+					chosen = idx; chosen_distance = distance
 	if chosen < 0: return
-	var amount := mini(carried, 10 - lantern_progress[chosen])
-	if amount <= 0: return
-	carried -= amount
-	lantern_progress[chosen] += amount
-	lanterns[chosen].scale = Vector3.ONE * (1.0 + float(lantern_progress[chosen]) * 0.03)
-	score += amount * 10
-	$Phase2UI.play_sfx("lantern")
-	if lantern_progress[chosen] >= 10:
-		score += 100
-		lanterns[chosen].get_child(0).light_energy = 2.0
-		var lamp_position: Vector3 = lanterns[chosen].position
-		for shade_data in shade_states:
-			var offset := Vector2(shade_data.node.position.x-lamp_position.x, shade_data.node.position.z-lamp_position.z)
-			if offset.length() < 6.0:
-				var outward := offset.normalized() if offset.length_squared() > 0.001 else Vector2.RIGHT
-				shade_data.node.position.x = lamp_position.x + outward.x * 6.0
-				shade_data.node.position.z = lamp_position.z + outward.y * 6.0
-				shade_data.safe_ticks = 30
-	world_environment.environment.ambient_light_energy = 0.15 + 0.55 * float(lantern_progress.count(10)) / float(lantern_progress.size())
+
+	if lantern_progress[chosen] < 10:
+		var cost := 5 if lantern_ever_lit[chosen] else 10
+		var amount := mini(carried, cost - lantern_progress[chosen])
+		if amount <= 0: return
+		carried -= amount
+		lantern_progress[chosen] += amount
+		score += amount * 5
+		$Phase2UI.play_sfx("lantern")
+		if lantern_progress[chosen] >= cost:
+			lantern_progress[chosen] = 10
+			lantern_fuel[chosen] = 100.0
+			var is_relight := lantern_ever_lit[chosen]
+			lantern_ever_lit[chosen] = true
+			if is_relight:
+				lantern_relit_count[chosen] += 1
+				score += 40
+			else:
+				score += 100
+			successful_lights += 1
+			capacity = mini(20, 10 + 2 * successful_lights)
+			lanterns[chosen].get_child(0).light_energy = 2.0
+			var lamp_position: Vector3 = lanterns[chosen].position
+			for shade_data in shade_states:
+				var offset := Vector2(shade_data.node.position.x-lamp_position.x, shade_data.node.position.z-lamp_position.z)
+				if offset.length() < 6.0:
+					var outward := offset.normalized() if offset.length_squared() > 0.001 else Vector2.RIGHT
+					shade_data.node.position.x = lamp_position.x + outward.x * 6.0
+					shade_data.node.position.z = lamp_position.z + outward.y * 6.0
+					shade_data.safe_ticks = 30
+					if shade_data.get("state") == "drain" and shade_data.get("target_lantern_id") == ("L%d" % (chosen + 1)):
+						shade_data["state"] = "wander"; shade_data["target_lantern_id"] = ""
+			world_environment.environment.ambient_light_energy = 0.15 + 0.55 * float(lantern_progress.count(10)) / float(lantern_progress.size())
+	else:
+		var needed := int(ceil((100.0 - lantern_fuel[chosen]) / 10.0))
+		var used := mini(carried, needed)
+		if used > 0:
+			var was_low := lantern_fuel[chosen] < 30.0
+			carried -= used
+			lantern_fuel[chosen] = minf(100.0, lantern_fuel[chosen] + float(used * 10))
+			score += used * 5
+			$Phase2UI.play_sfx("lantern")
+			if was_low and lantern_fuel[chosen] >= 30.0:
+				var lamp_pos: Vector3 = lanterns[chosen].position
+				for shade_data in shade_states:
+					if shade_data.get("state") == "drain" and shade_data.get("target_lantern_id") == ("L%d" % (chosen + 1)):
+						shade_data["state"] = "wander"; shade_data["target_lantern_id"] = ""
+					var offset := Vector2(shade_data.node.position.x-lamp_pos.x, shade_data.node.position.z-lamp_pos.z)
+					if offset.length() < 6.0:
+						var outward := offset.normalized() if offset.length_squared() > 0.001 else Vector2.RIGHT
+						shade_data.node.position.x = lamp_pos.x + outward.x * 6.0
+						shade_data.node.position.z = lamp_pos.z + outward.y * 6.0
+						shade_data.safe_ticks = 30
 
 func _evaluate_outcome() -> void:
 	if won or lost or outcome_awarded: return
 	if flames <= 0:
 		lost = true
-		return
-	if not lantern_progress.is_empty() and lantern_progress.all(func(value): return value >= 10):
-		won = true
-		score += floori(time_left) * 2 + flames * 50
 		outcome_awarded = true
-	elif time_left <= 0.0:
-		lost = true
+		return
+	if time_left <= 0.0:
+		var lit_count := lantern_progress.count(10)
+		var total_count := lanterns.size()
+		var needed := int(ceil(0.6 * float(total_count)))
+		if lit_count >= needed:
+			won = true
+			for i in lanterns.size():
+				if lantern_progress[i] >= 10:
+					score += 50 + int(floor(lantern_fuel[i]))
+			score += flames * 50
+			outcome_awarded = true
+		else:
+			lost = true
+			outcome_awarded = true
 
 func _collect_motes() -> void:
 	if respawn_ticks > 0: return
 	for i in range(motes.size() - 1, -1, -1):
-		if carried < 10 and Vector2(motes[i].x-player.x, motes[i].z-player.z).length() <= 1.0 and absf(motes[i].y-player.y) <= 1.5:
+		if carried < capacity and Vector2(motes[i].x-player.x, motes[i].z-player.z).length() <= 1.0 and absf(motes[i].y-player.y) <= 1.5:
 			motes.remove_at(i)
 			mote_ttl_ticks.remove_at(i)
 			mote_kinds.remove_at(i)
@@ -664,4 +797,18 @@ func _collect_motes() -> void:
 			mote_nodes.remove_at(i)
 			carried += 1
 			$Phase2UI.play_sfx("pickup")
+
+func _apply_accessibility() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load("user://settings.cfg") == OK:
+		colorblind_mode = bool(cfg.get_value("accessibility", "colorblind", false))
+	for shade_data in shade_states:
+		if is_instance_valid(shade_data.get("node")):
+			var mat: StandardMaterial3D = shade_data["material"]
+			mat.albedo_color = Color("00B3FF") if colorblind_mode else Color("120A1A")
+	for i in lanterns.size():
+		if lantern_progress[i] < 10:
+			lanterns[i].scale = Vector3(1.0, 0.8, 1.0) if colorblind_mode else Vector3.ONE
+		else:
+			lanterns[i].scale = Vector3.ONE
 

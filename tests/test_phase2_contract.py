@@ -120,10 +120,11 @@ class Phase2TimerContractTests(unittest.TestCase):
         resumed = snapshot_at(rows, 3)
         self.assertEqual(paused["state"], "paused")
         self.assertEqual(paused["sim_tick"], 0)
-        self.assertEqual(paused["time_left_s"], 300.0)
+        # Ticket-03 (Contract v1.2): night1_duration_s thay đổi từ 300s thành 240s
+        self.assertEqual(paused["time_left_s"], 240.0)
         self.assertEqual(paused["player"]["pulse_cd_s"], round(20 / 60, 3))
         self.assertEqual(paused_again["sim_tick"], 0)
-        self.assertEqual(paused_again["time_left_s"], 300.0)
+        self.assertEqual(paused_again["time_left_s"], 240.0)
         self.assertEqual(resumed["state"], "playing")
         self.assertEqual(resumed["sim_tick"], 1)
         self.assertEqual([row["name"] for row in rows if row["type"] == "event"], ["paused", "resumed", "night_start"])
@@ -220,8 +221,10 @@ class Phase2TimerContractTests(unittest.TestCase):
             inputs=[{"tick": 0, "interact": True}],
         )
         end = rows[-1]
-        self.assertEqual((end["state"], end["score"]), ("won", 210))
-        self.assertEqual(next(row for row in rows if row.get("name") == "game_over")["data"]["reason"], "all_lit")
+        # Ticket-03 (Contract v1.2): Thay thế all_lit bằng dawn_survived, công thức tính điểm mới:
+        # +5 (mote) + 100 (thắp lần đầu) + 746 (5 đèn x (50 + floor(fuel))) + 100 (2 flames x 50) = 951
+        self.assertEqual((end["state"], end["score"]), ("won", 951))
+        self.assertEqual(next(row for row in rows if row.get("name") == "game_over")["data"]["reason"], "dawn_survived")
 
     def test_night_three_terrain_has_half_ring_and_two_ramps(self):
         self.assertEqual(terrain_height(3, 0, 0), 6.0)
