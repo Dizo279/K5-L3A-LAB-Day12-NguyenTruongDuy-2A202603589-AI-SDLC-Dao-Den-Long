@@ -1,4 +1,4 @@
 resolution=1280x720
 frames=1800
-average_fps=179.96
-minimum_sample_fps=167.00
+average_fps=180.00
+minimum_sample_fps=180.00

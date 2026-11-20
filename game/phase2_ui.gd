@@ -256,10 +256,12 @@ func _show_result(won: bool) -> void:
 	var menu_button := Button.new(); menu_button.text = "MAIN MENU"; list.add_child(menu_button); menu_button.pressed.connect(_return_to_menu)
 
 func _build_audio() -> void:
+	if DisplayServer.get_name() == "headless": return
 	music = AudioStreamPlayer.new(); music.stream = _tone(110.0, 2.0, true); music.volume_db = -24; add_child(music); music.play()
 	sfx = AudioStreamPlayer.new(); sfx.volume_db = -10; add_child(sfx)
 
 func play_sfx(kind: String) -> void:
+	if not is_instance_valid(sfx): return
 	var hz := {"pickup": 880.0, "lantern": 520.0, "pulse": 330.0, "hit": 150.0, "jump": 660.0, "dash": 990.0, "win": 1040.0, "lose": 180.0, "shade": 240.0, "wind": 740.0}
 	sfx.stream = _tone(float(hz.get(kind, 440.0)), 0.35, false); sfx.play()
 

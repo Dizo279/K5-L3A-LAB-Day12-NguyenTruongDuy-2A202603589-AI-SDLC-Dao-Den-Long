@@ -33,3 +33,17 @@ python game\headless.py --seed 7 --night 1 --scenario tests\phase1_scenario.json
 
 The scenarios target individual contract events. They do not replace hidden
 grader tests or a full graphical play-through.
+
+## Automated Phase 2 checks
+
+Run from the repository root. The Godot runtime check temporarily points the
+project at its test scene and restores `game/project.godot` even on failure.
+
+```powershell
+python -m unittest tests/test_phase2_contract.py -v
+python tests/run_godot_runtime_checks.py --godot "D:\Godot_v4.7.2-stable_win64.exe"
+```
+
+The checks cover timer boundaries, night-specific shade schedules, pause
+freezing, drifter theft during invulnerability, score at dawn, lantern
+selection, terrain height, winning bonus, and the Night 3 upper terrace mesh.

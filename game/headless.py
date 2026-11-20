@@ -134,6 +134,15 @@ class Sim:
         self.dash_cd=max(0,self.dash_cd-1)
         self.pulse_cd=max(0,self.pulse_cd-1)
         self.charm_ticks=max(0,self.charm_ticks-1)
+        for c in self.charms:
+            if not c["available"]:
+                c["respawn"]-=1
+                if c["respawn"]<=0: c["available"]=True
+        if self.respawn_ticks>0:
+            self.respawn_ticks-=1
+            if self.respawn_ticks==0:
+                self.player["pos"]=list(MAP_STARTS[self.night])
+                self.jump_vel=0; self.grounded=True; self.fall_triggered=False
         if self.recoil_ticks>0: self.recoil_ticks-=1
         for m in self.motes:
             if m[5] is not None: m[5]-=1
@@ -207,11 +216,6 @@ class Sim:
             if self.player["flames"]>0:
                 self.respawn_ticks=60
                 self.invuln=90
-        if self.respawn_ticks>0:
-            self.respawn_ticks-=1
-            if self.respawn_ticks==0:
-                self.player["pos"]=list(MAP_STARTS[self.night])
-                self.jump_vel=0; self.grounded=True; self.fall_triggered=False
         for m in self.motes[:]:
             if m[5] is not None and m[5]<=0: self.motes.remove(m); continue
             if self.respawn_ticks<=0 and self.player["carried"] < T["carry_capacity"] and dist(self.player["pos"],m[:3])<=T["pickup_radius"] and abs(self.player["pos"][1]-m[1])<=1.5:
@@ -236,12 +240,12 @@ class Sim:
             for d in self.drifters:
                 if dist3([self.player["pos"][0],self.player["pos"][1]+0.8,self.player["pos"][2]],d["pos"])<=T["pulse_radius"]:
                     if d["state"]=="chase":
-                        d["state"]="flee"; d["flee_ticks"]=240
+                        d["state"]="flee"; d["flee_ticks"]=241
                     elif d["state"]=="flee" and d["stolen"]>0:
                         for _ in range(d["stolen"]):
                             self.motes.append([*d["pos"],f"M{self.next_mote_id}","dropped",480]); self.next_mote_id+=1
                         self.event("drifter_drop",{"drifter_id":d["id"],"amount":d["stolen"]})
-                        d["stolen"]=0; d["state"]="removed"
+                        d["stolen"]=0; d["state"]="flee"; d["flee_ticks"]=121
             self.event("pulse",{"stunned_ids":stunned})
         for d in self.drifters:
             if d["state"]=="removed": continue
@@ -256,10 +260,6 @@ class Sim:
                 d["pos"][0]+=dx/ln*sp/60; d["pos"][2]+=dz/ln*sp/60
             if d["state"]=="chase" and not d["robbed"] and dist(self.player["pos"],d["pos"])<=1.2:
                 amount=min(3,self.player["carried"]); self.player["carried"]-=amount; d["stolen"]+=amount; d["robbed"]=True; d["state"]="flee"; d["flee_ticks"]=240; self.event("drifter_steal",{"drifter_id":d["id"],"amount":amount,"carried":self.player["carried"]})
-        for c in self.charms:
-            if not c["available"]:
-                c["respawn"]-=1
-                if c["respawn"]<=0: c["available"]=True
         for s in self.shades:
             if s["spawn"]>0 or s["state"]=="spawning":
                 if s["spawn"]<=0: s["spawn"]=60
@@ -302,9 +302,12 @@ class Sim:
             did=f"D{self.next_drifter_id}"; self.next_drifter_id+=1
             point=map_mote_points(self.night)[self.rng.randrange(len(map_mote_points(self.night)))]
             self.drifters.append({"id":did,"pos":list(point),"state":"idle","stolen":0,"flee_ticks":0}); self.event("drifter_spawned",{"id":did})
-        if self.random_shades and self.sim_tick>=300:
-            interval=(480,420,360)[self.night-1]
-            slots=2 if self.night==1 and self.sim_tick==300 else (1 if (self.sim_tick-300)%interval==0 else 0)
+        if self.random_shades:
+            if self.night==1:
+                slots=2 if self.sim_tick==300 else (1 if self.sim_tick>300 and (self.sim_tick-300)%480==0 else 0)
+            else:
+                interval=420 if self.night==2 else 360
+                slots=1 if self.sim_tick>0 and self.sim_tick%interval==0 else 0
             for _ in range(slots):
                 if len(self.shades)>=(6,8,10)[self.night-1]: break
                 valid=[p for p in MAP_SHADE_POINTS[self.night] if dist(p,self.player["pos"])>=15]
