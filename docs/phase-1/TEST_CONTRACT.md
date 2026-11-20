@@ -1,4 +1,7 @@
-# Test Contract — Phase 1
+# Test Contract — Phase 1 baseline
+
+> Phase 2 supersedes this file with Contract v1.1. It is retained as the
+> regression baseline required by Ticket-02.
 
 ## Mục đích
 

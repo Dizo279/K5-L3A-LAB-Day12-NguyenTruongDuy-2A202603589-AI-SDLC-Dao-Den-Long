@@ -111,6 +111,9 @@ Project Godot nằm trong thư mục `game/`.
 
 Headless contract:
 
+Trong prototype Godot: mũi tên để di chuyển, `Enter` để lướt, `Tab` để nhặt/nạp,
+`Esc` để tạm dừng.
+
 ```powershell
 python game\headless.py --seed 7 --night 1 --ticks 600 --out docs\phase-1\proof\run.jsonl
 ```
@@ -119,3 +122,16 @@ python game\headless.py --seed 7 --night 1 --ticks 600 --out docs\phase-1\proof\
 
 Prototype dùng bảng màu đêm xanh tím đối lập với đèn vàng cam, đảo tròn nổi
 giữa biển mây và HUD tiếng Việt. Các chi tiết này không thay đổi JSONL headless.
+
+## Phase 2 quick start
+
+Requirements: Godot 4.x and Python 3. Start the graphical game with `godot --path game`. Use WASD or arrow keys to move, Space to jump, Shift to dash, E to interact, Q to pulse, and Esc/P to pause. The pause menu includes resume, restart, settings and main menu; settings save volume and mouse sensitivity locally.
+
+Headless check/build commands (run from the repository root):
+
+```sh
+python3 -m py_compile game/headless.py
+python3 game/headless.py --seed 7 --night 1 --ticks 600 --out docs/phase-2/proof/run.jsonl
+```
+
+Graphical build FPS evidence and individual Phase 2 scenarios are documented in `docs/phase-2/ACCEPTANCE.md` and `tests/README.md`.
